@@ -1,0 +1,88 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: famiflora_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-famiflora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-famiflora_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-famiflora_db}
+    ports:
+      - "5452:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-famiflora} -d ${POSTGRES_DB:-famiflora_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: famiflora_minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9020:9000" # API S3
+      - "9021:9001" # Console Web MinIO
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/minio:latest
+    container_name: famiflora_minio_init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin123};
+      mc mb -p local/catalog-images;
+      mc mb -p local/client-uploads;
+      mc anonymous set download local/catalog-images;
+      exit 0;
+      "
+
+  backend:
+    build: ./backend
+    container_name: famiflora_api
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-famiflora}:${POSTGRES_PASSWORD:-famiflora_secret}@postgres:5432/${POSTGRES_DB:-famiflora_db}
+      S3_ENDPOINT: http://minio:9000
+      S3_PUBLIC_URL: http://localhost:9020
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      LLM_MODEL: qwen3:8b
+      VISION_MODEL: llava:7b
+      EMBED_MODEL: nomic-embed-text
+      FALLBACK_MODE: "true"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8020:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./data:/app/data
+
+  frontend:
+    build: ./frontend
+    container_name: famiflora_ui
+    ports:
+      - "8100:80"
+    depends_on:
+      - backend
+
+volumes:
+  pg_data:
+  minio_data:
